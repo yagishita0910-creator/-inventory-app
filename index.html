@@ -1,0 +1,459 @@
+<!doctype html>
+<html lang="ja">
+<head>
+<meta charset="utf-8">
+<meta name="viewport" content="width=device-width, initial-scale=1, viewport-fit=cover">
+<meta name="theme-color" content="#0b6e5c">
+<meta name="apple-mobile-web-app-capable" content="yes">
+<title>棚卸・在庫管理</title>
+<style>
+:root{--ink:#17222b;--mut:#5d6b76;--bg:#eef2f4;--card:#fff;--line:#d3dce1;--acc:#0b6e5c;--warn:#b3361b}
+*{box-sizing:border-box}
+body{margin:0;font:16px/1.5 "Hiragino Sans","Noto Sans JP",system-ui,sans-serif;color:var(--ink);background:var(--bg);padding-bottom:calc(68px + env(safe-area-inset-bottom,0px))}
+header{position:sticky;top:0;z-index:5;display:flex;gap:8px;align-items:center;padding:calc(8px + env(safe-area-inset-top,0px)) 12px 8px;background:var(--acc);color:#fff}
+header b{flex:1;font-size:17px}
+header select,header button{font:inherit;padding:6px 8px;border-radius:8px;border:0;max-width:44vw}
+main{padding:12px;max-width:640px;margin:0 auto}
+.card{background:var(--card);border:1px solid var(--line);border-radius:12px;padding:12px;margin-bottom:12px}
+label{display:block;margin-bottom:10px;font-size:14px;color:var(--mut)}
+input,select{display:block;width:100%;font:inherit;font-size:16px;padding:10px;margin-top:4px;border:1px solid var(--line);border-radius:8px;background:#fff;color:var(--ink)}
+.row{display:flex;gap:8px}.row input{flex:1}
+button{font:inherit;cursor:pointer}
+button.primary{width:100%;padding:14px;border:0;border-radius:10px;background:var(--acc);color:#fff;font-weight:700;font-size:17px}
+button.scan{margin-top:4px;padding:0 16px;border:2px solid var(--acc);border-radius:8px;background:#fff;color:var(--acc);font-weight:700}
+button.sub{padding:10px 12px;border:1px solid var(--line);border-radius:8px;background:#fff;color:var(--ink)}
+button.danger{border-color:var(--warn);color:var(--warn)}
+button.chip{margin:0 6px 6px 0;padding:6px 10px;border:1px solid var(--acc);border-radius:16px;background:#fff;color:var(--acc);font-size:14px}
+.pname{min-height:24px;margin:-4px 0 10px;font-weight:700}
+h3{margin:18px 4px 8px;font-size:15px;color:var(--mut)}
+.item{background:var(--card);border:1px solid var(--line);border-radius:10px;padding:8px 12px;margin-bottom:8px}
+.item summary{cursor:pointer}.item .sm,.sm{font-size:13px;color:var(--mut)}
+.flex{display:flex;justify-content:space-between;gap:8px;align-items:center}
+.warn{color:var(--warn);font-weight:700}
+.ok{color:var(--acc);font-weight:700}
+table{width:100%;border-collapse:collapse;font-size:14px}td,th{padding:4px 6px;border-bottom:1px solid var(--line);text-align:left}
+nav{position:fixed;left:0;right:0;bottom:0;display:grid;grid-template-columns:repeat(5,1fr);background:#fff;border-top:1px solid var(--line);padding-bottom:env(safe-area-inset-bottom,0px)}
+nav button{padding:12px 0;border:0;background:none;font-size:14px;color:var(--mut)}
+nav button.on{color:var(--acc);font-weight:700;box-shadow:inset 0 3px 0 var(--acc)}
+#scanner{position:fixed;inset:0;z-index:20;background:#000;display:flex;flex-direction:column}
+#scanner[hidden]{display:none}
+#scanner video{flex:1;min-height:0;width:100%;object-fit:cover}
+#scanner p{margin:0;padding:12px;color:#fff;text-align:center}
+#scanner button{margin:12px;padding:14px;border:0;border-radius:10px;font-size:17px}
+.login{max-width:360px;margin:15vh auto 0;padding:0 16px}
+</style>
+</head>
+<body>
+<div id="app"></div>
+<div id="scanner" hidden>
+  <video id="video" playsinline muted></video>
+  <p>バーコードを枠いっぱいに映してください</p>
+  <button id="scancancel">キャンセル</button>
+</div>
+
+<script src="https://cdn.jsdelivr.net/npm/@supabase/supabase-js@2.45.4/dist/umd/supabase.js"></script>
+<script src="https://cdn.jsdelivr.net/npm/@zxing/library@0.21.3/umd/index.min.js"></script>
+<script>
+// ========== 設定(ここだけ書き換えます) ==========
+const SUPABASE_URL = 'https://hboevdfilcamjhiiwapj.supabase.co/rest/v1/';
+const SUPABASE_KEY = 'sb_publishable_zYq1dVgZTGwXs-waxeMhTg_9iyBtfVI';
+// ================================================
+
+const $ = (s, r = document) => r.querySelector(s);
+const esc = s => String(s ?? '').replace(/[&<>"']/g, c => ({'&':'&amp;','<':'&lt;','>':'&gt;','"':'&quot;',"'":'&#39;'}[c]));
+const today = () => new Date().toLocaleDateString('sv');
+const sb = supabase.createClient(SUPABASE_URL, SUPABASE_KEY);
+
+const S = { user: null, tab: 'count', staff: localStorage.getItem('staff') || '', products: new Map(), stock: [], events: [], staffList: [], counts: [], moves: [] };
+const F = { loc: 'store', jan: '', exp: '', qty: '', from: 'warehouse', to: 'store', note: '', q: '', sess: '棚卸-' + today(), dsess: '', email: '', pw: '' };
+
+// ---------- 場所 ----------
+const locName = l => l === 'store' ? '店頭' : l === 'warehouse' ? '倉庫' : l === 'in' ? '入荷・調整(増)' : l === 'out' ? '販売・廃棄・調整(減)' : l.startsWith('event:') ? '催事:' + l.slice(6) : l;
+const baseLocs = () => [['store', '店頭'], ['warehouse', '倉庫'], ...S.events.filter(e => !e.closed).map(e => ['event:' + e.name, '催事:' + e.name])];
+const opts = (list, sel) => list.map(([v, n]) => `<option value="${esc(v)}" ${v === sel ? 'selected' : ''}>${esc(n)}</option>`).join('');
+
+// ---------- データ読込 ----------
+async function all(table, build) {
+  let out = [], from = 0;
+  for (;;) {
+    let q = sb.from(table).select('*');
+    if (build) q = build(q);
+    const { data, error } = await q.range(from, from + 999);
+    if (error) throw error;
+    out = out.concat(data);
+    if (data.length < 1000) break;
+    from += 1000;
+  }
+  return out;
+}
+async function load() {
+  const [p, st, ev, sf, ct] = await Promise.all([
+    all('products', q => q.order('jan')),
+    all('stock', q => q.order('jan').order('loc').order('expiry')),
+    all('events', q => q.order('id')),
+    all('staff', q => q.order('id')),
+    all('counts', q => q.order('id'))
+  ]);
+  S.products = new Map(p.map(x => [x.jan, x]));
+  S.stock = st; S.events = ev; S.staffList = sf; S.counts = ct;
+  const { data, error } = await sb.from('movements').select('*').order('id', { ascending: false }).limit(30);
+  if (error) throw error;
+  S.moves = data || [];
+}
+async function run(fn) { try { await fn(); } catch (e) { alert('エラー: ' + (e.message || e)); } }
+const refresh = () => run(async () => { await load(); render(); });
+
+// ---------- バーコード読取 ----------
+function scan() {
+  return new Promise(async res => {
+    const box = $('#scanner'), v = $('#video');
+    let stream = null, on = true;
+    const stop = code => {
+      on = false;
+      if (stream) stream.getTracks().forEach(t => t.stop());
+      v.srcObject = null; box.hidden = true;
+      if (code) navigator.vibrate && navigator.vibrate(50);
+      res(code);
+    };
+    box.hidden = false;
+    $('#scancancel').onclick = () => stop(null);
+    try {
+      stream = await navigator.mediaDevices.getUserMedia({ video: { facingMode: { ideal: 'environment' } }, audio: false });
+      v.srcObject = stream; await v.play();
+    } catch (e) {
+      alert('カメラを使えません。ブラウザのカメラ許可を確認してください。');
+      return stop(null);
+    }
+    if ('BarcodeDetector' in window) {
+      const det = new BarcodeDetector({ formats: ['ean_13', 'ean_8', 'upc_a', 'upc_e', 'code_128', 'code_39', 'qr_code'] });
+      const loop = async () => {
+        if (!on) return;
+        try { const r = await det.detect(v); if (r.length) return stop(r[0].rawValue); } catch (e) {}
+        setTimeout(loop, 150);
+      };
+      loop();
+    } else {
+      const hints = new Map();
+      hints.set(ZXing.DecodeHintType.POSSIBLE_FORMATS, [ZXing.BarcodeFormat.EAN_13, ZXing.BarcodeFormat.EAN_8, ZXing.BarcodeFormat.UPC_A, ZXing.BarcodeFormat.CODE_128, ZXing.BarcodeFormat.QR_CODE]);
+      const reader = new ZXing.MultiFormatReader(); reader.setHints(hints);
+      const cv = document.createElement('canvas'), cx = cv.getContext('2d', { willReadFrequently: true });
+      const loop = () => {
+        if (!on) return;
+        if (v.videoWidth) {
+          cv.width = v.videoWidth; cv.height = v.videoHeight; cx.drawImage(v, 0, 0);
+          try {
+            const bmp = new ZXing.BinaryBitmap(new ZXing.HybridBinarizer(new ZXing.HTMLCanvasElementLuminanceSource(cv)));
+            return stop(reader.decode(bmp).getText());
+          } catch (e) {}
+        }
+        setTimeout(loop, 200);
+      };
+      loop();
+    }
+  });
+}
+
+// ---------- 画面部品 ----------
+const pnameText = j => !j ? '' : S.products.has(j) ? esc(S.products.get(j).name) : '<span class="warn">未登録のコードです(設定からCSV取込)</span>';
+const janField = () => `<label>商品コード(JAN)
+  <div class="row"><input id="jan" inputmode="numeric" autocomplete="off" value="${esc(F.jan)}"><button type="button" class="scan" data-act="scan">スキャン</button></div></label>
+  <div id="pname" class="pname">${pnameText(F.jan.trim())}</div>`;
+const lotsHtml = () => {
+  const j = F.jan.trim();
+  if (!j || F.from === 'in') return '';
+  const lots = S.stock.filter(r => r.jan === j && r.loc === F.from);
+  if (!lots.length) return `<div class="sm" style="margin-bottom:10px">${esc(locName(F.from))}に帳簿上の在庫がありません</div>`;
+  return `<div style="margin-bottom:10px"><div class="sm">賞味期限を選ぶ(帳簿上の在庫)</div>${lots.map(r => `<button type="button" class="chip" data-act="lot" data-exp="${esc(r.expiry || '')}">${r.expiry ? esc(r.expiry) : '期限なし'}(${Number(r.qty)})</button>`).join('')}</div>`;
+};
+const upd = () => {
+  if ($('#pname')) $('#pname').innerHTML = pnameText(F.jan.trim());
+  if ($('#lots')) $('#lots').innerHTML = lotsHtml();
+};
+
+// ---------- 各タブ ----------
+function viewCount() {
+  const rows = S.counts.filter(c => c.session === F.sess.trim()).slice(-15).reverse();
+  return `<div class="card">
+    <label>棚卸の名前<input id="sess" value="${esc(F.sess)}"></label>
+    <label>数える場所<select id="loc">${opts(baseLocs(), F.loc)}</select></label>
+    ${janField()}
+    <label>賞味期限<input type="date" id="exp" value="${esc(F.exp)}"></label>
+    <label>数量<input type="number" id="qty" inputmode="numeric" min="0" value="${esc(F.qty)}"></label>
+    <button class="primary" data-act="addcount">カウントを追加</button></div>
+  <h3>この棚卸の入力履歴(新しい順)</h3>
+  ${rows.map(c => `<div class="item flex"><div><b>${esc((S.products.get(c.jan) || {}).name || c.jan)}</b>
+    <div class="sm">${esc(locName(c.loc))} / ${c.expiry ? esc(c.expiry) : '期限なし'} / ${esc(c.staff)}</div></div>
+    <div class="flex"><b>${c.qty}</b><button class="sub danger" data-act="delcount" data-id="${c.id}">取消</button></div></div>`).join('') || '<div class="sm">まだ入力がありません</div>'}`;
+}
+
+function viewMove() {
+  const fromLocs = [['in', '入荷(仕入・初期登録)'], ...baseLocs()];
+  const toLocs = [...baseLocs(), ['out', '販売・廃棄など(在庫から外す)']];
+  return `<div class="card">
+    <label>移動元<select id="from">${opts(fromLocs, F.from)}</select></label>
+    <label>移動先<select id="to">${opts(toLocs, F.to)}</select></label>
+    ${janField()}
+    <div id="lots">${lotsHtml()}</div>
+    <label>賞味期限<input type="date" id="exp" value="${esc(F.exp)}"></label>
+    <label>数量<input type="number" id="qty" inputmode="numeric" min="1" value="${esc(F.qty)}"></label>
+    <label>メモ(任意)<input id="note" value="${esc(F.note)}"></label>
+    <button class="primary" data-act="domove">移動を記録</button></div>
+  <h3>最近の移動(新しい順)</h3>
+  ${S.moves.map(m => `<div class="item"><div class="flex"><b>${esc((S.products.get(m.jan) || {}).name || m.jan)}</b><b>${m.qty}</b></div>
+    <div class="sm">${esc(locName(m.from_loc))} → ${esc(locName(m.to_loc))} / ${m.expiry ? esc(m.expiry) : '期限なし'}</div>
+    <div class="sm">${esc(new Date(m.created_at).toLocaleString('ja-JP'))} / ${esc(m.staff)}${m.note ? ' / ' + esc(m.note) : ''}</div></div>`).join('') || '<div class="sm">まだ記録がありません</div>'}`;
+}
+
+function tally() {
+  const m = new Map();
+  for (const r of S.stock) {
+    const q = Number(r.qty);
+    let t = m.get(r.jan);
+    if (!t) { t = { store: 0, warehouse: 0, event: 0, lots: [] }; m.set(r.jan, t); }
+    t[r.loc === 'store' ? 'store' : r.loc === 'warehouse' ? 'warehouse' : 'event'] += q;
+    t.lots.push({ ...r, qty: q });
+  }
+  return m;
+}
+function stockList() {
+  const T = tally(), q = F.q.trim().toLowerCase();
+  const list = [...S.products.values()]
+    .filter(p => !q || p.jan.includes(q) || p.name.toLowerCase().includes(q))
+    .filter(p => q || T.has(p.jan) || p.pos_qty).slice(0, 100);
+  return list.map(p => {
+    const t = T.get(p.jan) || { store: 0, warehouse: 0, event: 0, lots: [] };
+    const book = t.store + t.warehouse + t.event;
+    return `<details class="item"><summary><div class="flex"><b>${esc(p.name)}</b><span class="${book === p.pos_qty ? 'ok' : 'warn'}">計${book} / POS${p.pos_qty}</span></div>
+      <div class="sm">店頭${t.store} / 倉庫${t.warehouse} / 持ち出し${t.event}</div></summary>
+      <table>${t.lots.map(l => `<tr><td>${esc(locName(l.loc))}</td><td>${l.expiry ? esc(l.expiry) : '期限なし'}</td><td>${l.qty}</td></tr>`).join('') || '<tr><td class="sm">帳簿上の在庫なし</td></tr>'}</table></details>`;
+  }).join('') || '<div class="sm">該当する商品がありません</div>';
+}
+function viewStock() {
+  const soon = new Date(Date.now() + 60 * 864e5).toLocaleDateString('sv');
+  const alerts = S.stock.filter(r => r.expiry && r.expiry <= soon).sort((a, b) => a.expiry < b.expiry ? -1 : 1).slice(0, 50);
+  return `<details class="card" ${alerts.length ? 'open' : ''}><summary><b>賞味期限が近い・切れている在庫(60日以内)</b> ${alerts.length}件</summary>
+    <table>${alerts.map(r => `<tr class="${r.expiry < today() ? 'warn' : ''}"><td>${esc((S.products.get(r.jan) || {}).name || r.jan)}</td><td>${esc(locName(r.loc))}</td><td>${esc(r.expiry)}</td><td>${Number(r.qty)}</td></tr>`).join('') || '<tr><td class="sm">該当なし</td></tr>'}</table></details>
+  <div class="card"><label>商品名またはコードで検索<input id="q" value="${esc(F.q)}"></label></div>
+  <div id="stocklist">${stockList()}</div>`;
+}
+
+const sessions = () => [...new Set(S.counts.map(c => c.session))];
+const curSess = () => F.dsess || sessions().slice(-1)[0] || '';
+function diffRows() {
+  const sess = curSess(), cm = new Map(), T = tally();
+  for (const c of S.counts) if (c.session === sess) cm.set(c.jan, (cm.get(c.jan) || 0) + c.qty);
+  const rows = [];
+  for (const p of S.products.values()) {
+    const t = T.get(p.jan), book = t ? t.store + t.warehouse + t.event : 0, act = cm.get(p.jan) || 0;
+    if (!p.pos_qty && !act && !book) continue;
+    rows.push({ jan: p.jan, name: p.name, pos: p.pos_qty, book, act, diff: act - p.pos_qty });
+  }
+  return rows;
+}
+function viewDiff() {
+  const ss = sessions();
+  if (!ss.length) return '<div class="card">まだ棚卸のカウントがありません。「カウント」タブから入力してください。</div>';
+  const rows = diffRows(), ng = rows.filter(r => r.diff !== 0).sort((a, b) => Math.abs(b.diff) - Math.abs(a.diff));
+  return `<div class="card"><label>棚卸を選ぶ<select id="dsess">${opts(ss.map(s => [s, s]), curSess())}</select></label>
+    <div class="sm">実数 = 店頭+倉庫+持ち出しのカウント合計。カウントしていない商品は実数0で表示されます。</div>
+    <p><b>${rows.length}</b>品目中、差異あり <b class="${ng.length ? 'warn' : 'ok'}">${ng.length}</b>品目</p>
+    <div class="row"><button class="sub" data-act="csv" style="flex:1">差異をCSV出力</button><button class="sub" data-act="adjust" style="flex:1">実数を帳簿に反映</button></div></div>
+  ${ng.slice(0, 200).map(r => `<div class="item"><div class="flex"><b>${esc(r.name)}</b><b class="warn">${r.diff > 0 ? '+' : ''}${r.diff}</b></div>
+    <div class="sm">POS ${r.pos} / 帳簿 ${r.book} / 実数 ${r.act}</div></div>`).join('')}`;
+}
+
+function viewAdmin() {
+  return `<div class="card"><b>商品マスタ(CSV取込)</b>
+    <p class="sm">列の順番は「JAN、商品名、POS在庫数」。1行目は見出しでも構いません。文字コードはUTF-8とShift_JISに対応しています。同じJANは上書きされます。</p>
+    <input type="file" id="csv" accept=".csv,.txt"></div>
+  <div class="card"><b>スタッフ</b>
+    <div class="sm">${S.staffList.map(s => esc(s.name)).join('、') || '未登録'}</div>
+    <div class="row" style="margin-top:8px"><input id="newstaff" placeholder="名前"><button class="sub" data-act="addstaff">追加</button></div></div>
+  <div class="card"><b>催事</b>
+    ${S.events.map(e => `<div class="flex" style="margin-top:6px"><span>${esc(e.name)}${e.closed ? '(終了)' : ''}</span>${e.closed ? '' : `<button class="sub" data-act="closeevent" data-id="${e.id}">終了にする</button>`}</div>`).join('')}
+    <div class="row" style="margin-top:8px"><input id="newevent" placeholder="催事名(例:関西かごしまファンデー)"><button class="sub" data-act="addevent">追加</button></div></div>
+  <button class="sub" data-act="logout" style="width:100%">ログアウト</button>`;
+}
+
+const views = { count: viewCount, move: viewMove, stock: viewStock, diff: viewDiff, admin: viewAdmin };
+const TABS = [['count', 'カウント'], ['move', '移動'], ['stock', '在庫'], ['diff', '差異'], ['admin', '設定']];
+
+function render() {
+  const app = $('#app');
+  if (!S.user) {
+    app.innerHTML = `<div class="login"><h2>棚卸・在庫管理</h2><div class="card">
+      <label>メールアドレス<input id="email" type="email" autocomplete="username" value="${esc(F.email)}"></label>
+      <label>パスワード<input id="pw" type="password" autocomplete="current-password" value="${esc(F.pw)}"></label>
+      <button class="primary" data-act="login">ログイン</button></div></div>`;
+    return;
+  }
+  app.innerHTML = `<header><b>棚卸・在庫管理</b>
+    <select id="staffsel"><option value="">担当者を選ぶ</option>${S.staffList.map(s => `<option ${s.name === S.staff ? 'selected' : ''}>${esc(s.name)}</option>`).join('')}</select>
+    <button data-act="reload">更新</button></header>
+    <main>${views[S.tab]()}</main>
+    <nav>${TABS.map(([k, n]) => `<button data-tab="${k}" class="${k === S.tab ? 'on' : ''}">${n}</button>`).join('')}</nav>`;
+}
+
+// ---------- CSV ----------
+function parseCSV(t) {
+  const rows = []; let r = [], c = '', q = false;
+  for (let i = 0; i < t.length; i++) {
+    const ch = t[i];
+    if (q) { if (ch === '"') { if (t[i + 1] === '"') { c += '"'; i++; } else q = false; } else c += ch; }
+    else if (ch === '"') q = true;
+    else if (ch === ',') { r.push(c); c = ''; }
+    else if (ch === '\n' || ch === '\r') { if (ch === '\r' && t[i + 1] === '\n') i++; r.push(c); rows.push(r); r = []; c = ''; }
+    else c += ch;
+  }
+  if (c !== '' || r.length) { r.push(c); rows.push(r); }
+  return rows.filter(x => x.some(v => v.trim() !== ''));
+}
+const decodeText = buf => { try { return new TextDecoder('utf-8', { fatal: true }).decode(buf); } catch (e) { return new TextDecoder('shift_jis').decode(buf); } };
+const csvCell = v => '"' + String(v ?? '').replace(/"/g, '""') + '"';
+function download(name, text) {
+  const a = document.createElement('a');
+  a.href = URL.createObjectURL(new Blob(['\uFEFF' + text], { type: 'text/csv' }));
+  a.download = name; document.body.appendChild(a); a.click(); a.remove();
+}
+async function importProducts(file) {
+  const rows = parseCSV(decodeText(await file.arrayBuffer()).replace(/^\uFEFF/, ''));
+  if (!rows.length) return alert('データがありません');
+  let ij = 0, inm = 1, iq = 2;
+  if (!/^\d+$/.test(rows[0][0].trim())) {
+    const h = rows.shift().map(x => x.trim());
+    const f = re => h.findIndex(x => re.test(x));
+    if (f(/JAN|コード|code/i) >= 0) ij = f(/JAN|コード|code/i);
+    if (f(/名|name/i) >= 0) inm = f(/名|name/i);
+    if (f(/在庫|数|qty|stock/i) >= 0) iq = f(/在庫|数|qty|stock/i);
+  }
+  const m = new Map();
+  for (const r of rows) {
+    const jan = (r[ij] || '').trim();
+    if (!jan) continue;
+    m.set(jan, { jan, name: (r[inm] || '').trim() || jan, pos_qty: parseInt((r[iq] || '0').replace(/,/g, ''), 10) || 0, updated_at: new Date().toISOString() });
+  }
+  const list = [...m.values()];
+  if (!list.length) return alert('取り込める行がありません');
+  if (!confirm(`${list.length}件を取り込みます。同じJANは上書きされます。`)) return;
+  for (let i = 0; i < list.length; i += 500) {
+    const { error } = await sb.from('products').upsert(list.slice(i, i + 500), { onConflict: 'jan' });
+    if (error) throw error;
+  }
+  await load(); render(); alert('取り込みました');
+}
+
+// ---------- 操作 ----------
+const needStaff = () => { if (!S.staff) { alert('画面右上で担当者を選んでください'); return false; } return true; };
+const act = {
+  async login() {
+    const { data, error } = await sb.auth.signInWithPassword({ email: F.email.trim(), password: F.pw });
+    if (error) throw error;
+    S.user = data.user; F.pw = ''; await load(); render();
+  },
+  async logout() { await sb.auth.signOut(); S.user = null; render(); },
+  reload() { return refresh(); },
+  async scan() {
+    const code = await scan();
+    if (code) { F.jan = code; $('#jan').value = code; upd(); }
+  },
+  lot(el) { F.exp = el.dataset.exp; $('#exp').value = F.exp; },
+  async addcount() {
+    if (!needStaff()) return;
+    const jan = F.jan.trim(), qty = parseInt(F.qty, 10);
+    if (!S.products.has(jan)) return alert('商品コードが未登録です');
+    if (!(qty >= 0)) return alert('数量を入力してください');
+    if (!F.sess.trim()) return alert('棚卸の名前を入力してください');
+    const { error } = await sb.from('counts').insert({ session: F.sess.trim(), staff: S.staff, jan, loc: F.loc, expiry: F.exp || null, qty });
+    if (error) throw error;
+    F.jan = ''; F.qty = ''; await load(); render(); navigator.vibrate && navigator.vibrate(40);
+  },
+  async delcount(el) {
+    if (!confirm('この入力を取り消しますか?')) return;
+    const { error } = await sb.from('counts').delete().eq('id', el.dataset.id);
+    if (error) throw error;
+    await load(); render();
+  },
+  async domove() {
+    if (!needStaff()) return;
+    const jan = F.jan.trim(), qty = parseInt(F.qty, 10);
+    if (!S.products.has(jan)) return alert('商品コードが未登録です');
+    if (F.from === F.to) return alert('移動元と移動先が同じです');
+    if (!(qty > 0)) return alert('数量を入力してください');
+    if (F.from !== 'in') {
+      const have = S.stock.filter(r => r.jan === jan && r.loc === F.from && (r.expiry || '') === (F.exp || '')).reduce((a, r) => a + Number(r.qty), 0);
+      if (qty > have && !confirm(`帳簿上の在庫(${have})を超えています。記録しますか?`)) return;
+    }
+    const { error } = await sb.from('movements').insert({ staff: S.staff, jan, expiry: F.exp || null, qty, from_loc: F.from, to_loc: F.to, note: F.note.trim() || null });
+    if (error) throw error;
+    F.jan = ''; F.qty = ''; F.note = ''; await load(); render(); navigator.vibrate && navigator.vibrate(40);
+  },
+  csv() {
+    const rows = diffRows();
+    const head = ['JAN', '商品名', 'POS理論値', '帳簿(店頭+倉庫+持ち出し)', '実数', '差異(実数-POS)'];
+    download(`差異_${curSess()}.csv`, [head, ...rows.map(r => [r.jan, r.name, r.pos, r.book, r.act, r.diff])].map(r => r.map(csvCell).join(',')).join('\r\n'));
+  },
+  async adjust() {
+    if (!needStaff()) return;
+    const sess = curSess(), cs = S.counts.filter(c => c.session === sess), locs = new Set(cs.map(c => c.loc));
+    const K = (j, l, e) => [j, l, e || ''].join('\t');
+    const cm = new Map(), sm = new Map();
+    for (const c of cs) cm.set(K(c.jan, c.loc, c.expiry), (cm.get(K(c.jan, c.loc, c.expiry)) || 0) + c.qty);
+    for (const r of S.stock) if (locs.has(r.loc)) sm.set(K(r.jan, r.loc, r.expiry), Number(r.qty));
+    const rows = [];
+    for (const k of new Set([...cm.keys(), ...sm.keys()])) {
+      const [jan, loc, exp] = k.split('\t'), d = (cm.get(k) || 0) - (sm.get(k) || 0);
+      if (!d) continue;
+      const base = { staff: S.staff, jan, expiry: exp || null, qty: Math.abs(d), note: '棚卸調整:' + sess };
+      rows.push(d > 0 ? { ...base, from_loc: 'in', to_loc: loc } : { ...base, from_loc: loc, to_loc: 'out' });
+    }
+    if (!rows.length) return alert('帳簿とカウントは一致しています。反映する差はありません。');
+    if (!confirm(`「${sess}」でカウントした場所(${[...locs].map(locName).join('、')})の帳簿を、実数に合わせます。\n調整の記録を${rows.length}件追加します。よろしいですか?`)) return;
+    for (let i = 0; i < rows.length; i += 500) {
+      const { error } = await sb.from('movements').insert(rows.slice(i, i + 500));
+      if (error) throw error;
+    }
+    await load(); render(); alert('帳簿に反映しました');
+  },
+  async addstaff() {
+    const name = $('#newstaff').value.trim(); if (!name) return;
+    const { error } = await sb.from('staff').insert({ name }); if (error) throw error;
+    await load(); render();
+  },
+  async addevent() {
+    const name = $('#newevent').value.trim(); if (!name) return;
+    const { error } = await sb.from('events').insert({ name }); if (error) throw error;
+    await load(); render();
+  },
+  async closeevent(el) {
+    if (!confirm('この催事を終了にしますか?(残りの在庫は先に「移動」で戻してください)')) return;
+    const { error } = await sb.from('events').update({ closed: true }).eq('id', el.dataset.id); if (error) throw error;
+    await load(); render();
+  }
+};
+
+const app = $('#app');
+app.addEventListener('click', e => {
+  const t = e.target.closest('[data-tab]');
+  if (t) { S.tab = t.dataset.tab; render(); refresh(); return; }
+  const a = e.target.closest('[data-act]');
+  if (a && act[a.dataset.act]) run(() => act[a.dataset.act](a));
+});
+app.addEventListener('input', e => {
+  const id = e.target.id;
+  if (id === 'staffsel') { S.staff = e.target.value; localStorage.setItem('staff', S.staff); return; }
+  if (id === 'csv') { const f = e.target.files[0]; e.target.value = ''; if (f) run(() => importProducts(f)); return; }
+  if (!(id in F)) return;
+  F[id] = e.target.value;
+  if (id === 'jan' || id === 'from') upd();
+  if (id === 'q' && $('#stocklist')) $('#stocklist').innerHTML = stockList();
+  if (id === 'dsess') render();
+});
+
+run(async () => {
+  const { data } = await sb.auth.getSession();
+  if (data.session) { S.user = data.session.user; await load(); }
+  render();
+});
+</script>
+</body>
+</html>
